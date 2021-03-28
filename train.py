@@ -5,89 +5,85 @@ import pandas_datareader as datareader
 import datetime as dt
 import matplotlib.pyplot as plt
 from random import shuffle
+import argparse
 from plot import *
-from data import *
 from model import StockPricePredictor
+from data_loader import *
 
-COMPANY = "TSLA"
-START = [2011, 1, 1]
-END = [2021, 2, 23]
+COMPANY = "GOOG"
+START = [2017, 1, 1]
+END = None
 
-epoch = 5
-lr = 5e-4
+N_FC = [1024, 512, 256]
+BATCH_SIZE = 4
+epoch = 10
+lr = 1e-4
+VER = "2"
+SAVE_PATH = os.path.join("models", COMPANY + "_lr_" + str(lr) + "_ver_" + VER + ".pt")
 MODEL_PATH = None
-SAVE_PATH = COMPANY + "_model.pt"
+
+ACCURACY_PATH = os.path.join("comparison", COMPANY + "_lr_" + str(lr) + "_ver_" + VER + "_accuracy" + ".png")
+LOSS_PATH = os.path.join("loss", COMPANY + "_lr_" + str(lr) + "_ver_" + VER + "_loss" + ".png")
 
 
-def train(input_size, model=None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def train():
+    print("Training Start")
+    print("company:", COMPANY)
+    print("version:", VER)
+    print("learning rate:", lr)
 
-    model = StockPricePredictor().to(device)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print("device:", device)
+
+    model = StockPricePredictor(N_FC).to(device)
+    if MODEL_PATH:
+        model.load_state_dict(torch.load(MODEL_PATH))
     model.train()
 
-    loss_plot = []
     MSELoss = torch.nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.75)
 
-    data = get_stock_close_price(COMPANY, START, END)
-    data = torch.from_numpy(data)
+    dataset = StockDataset(COMPANY, START)
+    training_dataset, valid_dataset = get_loaded_data(dataset=dataset, batch_size=BATCH_SIZE)
 
+    loss_plot = []
     for e in range(epoch):
-        for i in range(len(data) - input_size):
+        print("epoch:", e + 1)
+        for i, (input_data, label) in enumerate(training_dataset):
             optimizer.zero_grad()
 
-            highest = data[i: i + input_size + 1].max().float()
-            price = data[i: i + input_size].float() / highest
-            price = price.reshape(1, 1, -1)
-            true = data[i + input_size].float() / highest
+            input_data = input_data.to(device).float()
+            label = label.to(device).float()
+            output = model(input_data)
 
-            predicted = model(price)
-            loss = MSELoss(predicted, true)
-
-            loss_plot.append(loss.item())
-            print("predicted:", predicted.item())
-            print("true:", true.item())
-            print("loss:", loss.item())
-
+            loss = MSELoss(output, label)
             loss.backward()
+            loss_plot.append(loss.item())
             optimizer.step()
+            print("training progress: %4d / %4d\r" % (i + 1, len(training_dataset)), end="")
 
-    torch.save(model.state_dict(), SAVE_PATH)
-    plot_loss(loss_plot)
+        scheduler.step()
+        print("\n")
 
-
-def evaluate(model_path, input_size):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = StockPricePredictor().to(device)
-    model.load_state_dict(torch.load(model_path))
+    print("Evaluation Start")
     model.eval()
-
     predicted_plot = []
     true_plot = []
+    for i, (input_data, label) in enumerate(valid_dataset):
+        input_data = input_data.to(device).float()
+        label = label.to(device).float()
+        output = model(input_data)
 
-    data = get_stock_close_price(COMPANY, START, END)
-    data = torch.from_numpy(data)
+        predicted_plot.append(output.item() * dataset.max)
+        true_plot.append(label.item() * dataset.max)
 
-    for i in range(len(data) - input_size):
-        highest = data[i: i + input_size + 1].max().float()
-        price = data[i: i + input_size].float() / highest
-        price = price.reshape(1, 1, -1)
-        true = data[i + input_size].float()
+    torch.save(model.state_dict(), SAVE_PATH)
 
-        true_plot.append(true)
-        predicted = model(price)
-        print(predicted)
-        predicted *= highest
-        predicted_plot.append(predicted)
-
-    plot_accuracy(predicted_plot, true_plot)
+    model_name = COMPANY + " ver " + VER
+    plot_loss(loss_plot, model_name, LOSS_PATH)
+    plot_accuracy(predicted_plot, true_plot, model_name, ACCURACY_PATH)
 
 
-
-
-train(60)
-evaluate(SAVE_PATH, 60)
-
-
-
+if __name__ == "__main__":
+    train()
